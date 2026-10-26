@@ -11,6 +11,7 @@ from parking_assistant.db import Database
 from parking_assistant.embeddings import build_embeddings
 from parking_assistant.knowledge import load_chunks
 from parking_assistant.llm import build_chat_model
+from parking_assistant.mcp_client import ExportRecorder
 from parking_assistant.rag import RagAnswerer
 from parking_assistant.reservations import ReservationService
 from parking_assistant.timeutils import utc_now
@@ -31,6 +32,7 @@ class Container:
     index: KnowledgeIndex
     answerer: RagAnswerer
     admin_agent: AdminAgent
+    recorder: ExportRecorder
     workflow: ApprovalService
     chat: ChatService
 
@@ -43,6 +45,7 @@ def build_container(
     *,
     clock=utc_now,
     index: KnowledgeIndex | None = None,
+    recorder: ExportRecorder | None = None,
     llm=None,
     use_configured_llm: bool = True,
 ) -> Container:
@@ -66,7 +69,8 @@ def build_container(
     )
     answerer = RagAnswerer(retriever, db, service, llm)
     admin_agent = AdminAgent(service, llm)
-    workflow = ApprovalService(service, admin_agent)
+    recorder = recorder or ExportRecorder(settings)
+    workflow = ApprovalService(service, admin_agent, recorder)
     chat = ChatService(db, service, answerer, workflow)
     return Container(
         settings=settings,
@@ -75,6 +79,7 @@ def build_container(
         index=index,
         answerer=answerer,
         admin_agent=admin_agent,
+        recorder=recorder,
         workflow=workflow,
         chat=chat,
     )
