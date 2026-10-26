@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from parking_assistant.config import Settings
-from parking_assistant.container import build_container
+from parking_assistant.container import Container, build_container
 from parking_assistant.db import Database
 from parking_assistant.embeddings import HashingEmbeddings
 from parking_assistant.mcp_client import RecordResult
@@ -111,3 +111,13 @@ def container(settings: Settings, clock: FakeClock, recorder: InProcessRecorder)
     )
     yield built
     built.close()
+
+
+def rebuild(settings: Settings, clock: FakeClock, recorder) -> Container:
+    return build_container(
+        settings,
+        clock=clock,
+        index=MemoryIndex(HashingEmbeddings()),
+        recorder=recorder,
+        use_configured_llm=False,
+    )

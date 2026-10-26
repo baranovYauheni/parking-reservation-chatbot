@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from dataclasses import dataclass
 
+from langgraph.checkpoint.sqlite import SqliteSaver
+
 from parking_assistant.admin_agent import AdminAgent
-from parking_assistant.approval import ApprovalService
-from parking_assistant.chat import ChatService
 from parking_assistant.config import Settings
 from parking_assistant.db import Database
 from parking_assistant.embeddings import build_embeddings
+from parking_assistant.graphs import ChatGraph, ReservationWorkflow
 from parking_assistant.knowledge import load_chunks
 from parking_assistant.llm import build_chat_model
 from parking_assistant.mcp_client import ExportRecorder
@@ -33,11 +35,13 @@ class Container:
     answerer: RagAnswerer
     admin_agent: AdminAgent
     recorder: ExportRecorder
-    workflow: ApprovalService
-    chat: ChatService
+    workflow: ReservationWorkflow
+    chat: ChatGraph
+    checkpoint_conn: sqlite3.Connection
 
     def close(self) -> None:
         self.index.close()
+        self.checkpoint_conn.close()
 
 
 def build_container(
@@ -70,8 +74,14 @@ def build_container(
     answerer = RagAnswerer(retriever, db, service, llm)
     admin_agent = AdminAgent(service, llm)
     recorder = recorder or ExportRecorder(settings)
-    workflow = ApprovalService(service, admin_agent, recorder)
-    chat = ChatService(db, service, answerer, workflow)
+
+    conn = sqlite3.connect(settings.checkpoint_path, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode = WAL")
+    checkpointer = SqliteSaver(conn)
+    checkpointer.setup()
+
+    workflow = ReservationWorkflow(service, admin_agent, recorder, checkpointer)
+    chat = ChatGraph(service, answerer, workflow, checkpointer)
     return Container(
         settings=settings,
         db=db,
@@ -82,4 +92,5 @@ def build_container(
         recorder=recorder,
         workflow=workflow,
         chat=chat,
+        checkpoint_conn=conn,
     )
