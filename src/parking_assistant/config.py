@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from pathlib import Path
 from typing import Literal
 
@@ -20,6 +21,8 @@ class Settings(BaseSettings):
     knowledge_dir: Path = Field(
         default=PROJECT_ROOT / "data" / "knowledge", alias="PARKING_KNOWLEDGE_DIR"
     )
+
+    admin_token: SecretStr | None = Field(default=None, alias="ADMIN_TOKEN")
 
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL")
@@ -65,6 +68,10 @@ class Settings(BaseSettings):
     @property
     def llm_available(self) -> bool:
         return self.llm_enabled and self.openai_api_key is not None
+
+    def ensure_secrets(self) -> None:
+        if self.admin_token is None:
+            self.admin_token = SecretStr(secrets.token_urlsafe(24))
 
     def prepare_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

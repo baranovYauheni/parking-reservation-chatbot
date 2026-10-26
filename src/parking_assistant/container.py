@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from parking_assistant.admin_agent import AdminAgent
+from parking_assistant.approval import ApprovalService
 from parking_assistant.chat import ChatService
 from parking_assistant.config import Settings
 from parking_assistant.db import Database
@@ -28,6 +30,8 @@ class Container:
     service: ReservationService
     index: KnowledgeIndex
     answerer: RagAnswerer
+    admin_agent: AdminAgent
+    workflow: ApprovalService
     chat: ChatService
 
     def close(self) -> None:
@@ -43,6 +47,7 @@ def build_container(
     use_configured_llm: bool = True,
 ) -> Container:
     settings.prepare_dirs()
+    settings.ensure_secrets()
 
     db = Database(settings.db_path)
     db.init()
@@ -60,12 +65,16 @@ def build_container(
         index=index, k=settings.retrieval_k, min_score=settings.min_score
     )
     answerer = RagAnswerer(retriever, db, service, llm)
-    chat = ChatService(db, service, answerer)
+    admin_agent = AdminAgent(service, llm)
+    workflow = ApprovalService(service, admin_agent)
+    chat = ChatService(db, service, answerer, workflow)
     return Container(
         settings=settings,
         db=db,
         service=service,
         index=index,
         answerer=answerer,
+        admin_agent=admin_agent,
+        workflow=workflow,
         chat=chat,
     )
