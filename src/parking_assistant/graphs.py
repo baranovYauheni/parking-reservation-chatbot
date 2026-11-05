@@ -9,6 +9,7 @@ from typing import Any, Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from parking_assistant import smalltalk
 from parking_assistant.admin_agent import AdminAgent
 from parking_assistant.booking_dialog import (
     current_prompt,
@@ -20,6 +21,7 @@ from parking_assistant.booking_dialog import (
     wants_booking,
     wants_status,
 )
+from parking_assistant.extraction import build_extractor
 from parking_assistant.guardrails import check_user_input
 from parking_assistant.mcp_client import ExportRecorder
 from parking_assistant.rag import RagAnswerer
@@ -260,10 +262,13 @@ class ChatGraph:
         answerer: RagAnswerer,
         workflow: ReservationWorkflow,
         checkpointer: Any,
+        llm: Any = None,
     ) -> None:
         self.service = service
         self.answerer = answerer
         self.workflow = workflow
+        self.llm = llm
+        self.extractor = build_extractor(llm) if llm is not None else None
         self._locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
         self._locks_guard = threading.Lock()
         self.graph = self._build().compile(checkpointer=checkpointer)
@@ -289,19 +294,33 @@ class ChatGraph:
         if in_booking:
             if is_question(text) and not wants_booking(text):
                 return "info"
+            if smalltalk.detect(text) and booking.get("awaiting") != "first_name":
+                return "smalltalk"
             return "booking"
         if wants_status(text) or is_confirmation(text):
             return "status"
         if wants_booking(text):
             return "booking"
+        if smalltalk.detect(text):
+            return "smalltalk"
         return "info"
+
+    def _smalltalk(self, state: ChatState) -> ChatState:
+        text = state["input"]
+        reply = smalltalk.reply(smalltalk.detect(text) or "help", text, self.llm)
+        booking = state.get("booking") or new_booking_state()
+        if booking["mode"] != "idle":
+            reply += "\n\nBack to your booking: " + current_prompt(
+                dict(booking), self.service
+            )
+        return {"reply": reply, "sources": [], "route": "smalltalk"}
 
     def _info(self, state: ChatState) -> ChatState:
         answer = self.answerer.answer(state["input"])
         reply = answer.text
         booking = state.get("booking") or new_booking_state()
         if booking["mode"] != "idle":
-            reply += "\n\nBack to your reservation: " + current_prompt(
+            reply += "\n\nBack to your booking: " + current_prompt(
                 dict(booking), self.service
             )
         return {"reply": reply, "sources": answer.sources, "route": "info"}
@@ -309,9 +328,11 @@ class ChatGraph:
     def _booking(self, state: ChatState) -> ChatState:
         booking = state.get("booking") or new_booking_state()
         if booking["mode"] == "idle":
-            step = start_booking(booking, state["input"], self.service)
+            step = start_booking(booking, state["input"], self.service, self.extractor)
         else:
-            step = handle_booking_message(booking, state["input"], self.service)
+            step = handle_booking_message(
+                booking, state["input"], self.service, self.extractor
+            )
         pending = step.submit.model_dump(mode="json") if step.submit else None
         return {
             "reply": step.reply,
@@ -330,7 +351,7 @@ class ChatGraph:
         except ReservationError as exc:
             booking = dict(state["booking"])
             return {
-                "reply": f"I couldn't submit the request: {exc} "
+                "reply": f"Sorry, I couldn't send that request: {exc} "
                 + current_prompt(booking, self.service),
                 "booking": booking,
                 "pending_request": None,
@@ -338,19 +359,19 @@ class ChatGraph:
         try:
             self.workflow.start(reservation.id)
             status_text = (
-                "It is now waiting for a human administrator's decision. "
-                "Ask me 'status' at any time to check it."
+                "An administrator will review it shortly, and you'll see the "
+                "answer right here. You can also ask me \u201cstatus\u201d anytime."
             )
         except Exception:
             logger.exception("workflow start failed for %s", reservation.id)
             status_text = (
-                "It was saved but could not be forwarded right now; it will be "
-                "forwarded automatically."
+                "It's saved, but I couldn't pass it on just now. I'll forward it "
+                "automatically."
             )
         submitted = list(state.get("submitted") or []) + [reservation.id]
         return {
-            "reply": f"Your reservation request #{reservation.id[:8]} was submitted. "
-            + status_text,
+            "reply": f"Done! I've sent booking request #{reservation.id[:8]} to the "
+            "administrator. " + status_text,
             "booking": new_booking_state(),
             "pending_request": None,
             "submitted": submitted,
@@ -361,11 +382,11 @@ class ChatGraph:
         reservations = self.service.list_for_session(state["session_id"])
         if not reservations:
             return {
-                "reply": "You have no reservation requests in this chat yet. "
-                "Say 'book' to make one.",
+                "reply": "You don't have any bookings with me yet. Just say "
+                "\u201cbook a space\u201d whenever you're ready.",
                 "route": "status",
             }
-        lines = ["Your reservation requests:"]
+        lines = ["Here's what I have for you:"]
         for r in reservations:
             lines.append(
                 f"- #{r.id[:8]} {r.car_number}, {human_local(r.start)} - "
@@ -392,6 +413,7 @@ class ChatGraph:
         graph.add_node("booking", self._booking)
         graph.add_node("submit", self._submit)
         graph.add_node("status", self._status)
+        graph.add_node("smalltalk", self._smalltalk)
         graph.add_node("finish", self._finish)
         graph.add_edge(START, "guard")
         graph.add_conditional_edges(
@@ -401,6 +423,7 @@ class ChatGraph:
                 "info": "info",
                 "booking": "booking",
                 "status": "status",
+                "smalltalk": "smalltalk",
                 "finish": "finish",
             },
         )
@@ -410,6 +433,7 @@ class ChatGraph:
         graph.add_edge("info", "finish")
         graph.add_edge("submit", "finish")
         graph.add_edge("status", "finish")
+        graph.add_edge("smalltalk", "finish")
         graph.add_edge("finish", END)
         return graph
 

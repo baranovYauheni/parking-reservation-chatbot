@@ -39,7 +39,7 @@ def test_availability_for_period_in_question(db, service):
 def test_unknown_question_is_answered_honestly(db, service):
     answer = make_answerer(db, service).answer("Do you sell coffee?")
     assert answer.unknown
-    assert "don't have information" in answer.text
+    assert "don't have anything on that" in answer.text
 
 
 def test_llm_path_builds_context_and_redacts_output(db, service):

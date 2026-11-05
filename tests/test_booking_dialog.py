@@ -51,7 +51,7 @@ def test_end_before_start_is_rejected(service):
     step = run(
         service, "book", "John Smith", "AB123CD", "2026-10-20 12:00", "2026-10-20 11:00"
     )
-    assert "end must be after the start" in step.reply
+    assert "is before the start" in step.reply
     assert step.state["awaiting"] == "end"
 
 
