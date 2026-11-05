@@ -30,3 +30,10 @@ def test_ensure_secrets_persists_mcp_secret_with_private_permissions(tmp_path):
         again.load_mcp_secret().get_secret_value()
         == settings.mcp_shared_secret.get_secret_value()
     )
+
+
+def test_blank_secrets_from_env_file_are_treated_as_unset(tmp_path):
+    settings = make(tmp_path, OPENAI_API_KEY="", ADMIN_TOKEN="  ")
+    assert settings.openai_api_key is None
+    assert settings.admin_token is None
+    assert not settings.llm_available
