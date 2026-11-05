@@ -81,7 +81,7 @@ def build_container(
     checkpointer.setup()
 
     workflow = ReservationWorkflow(service, admin_agent, recorder, checkpointer)
-    chat = ChatGraph(service, answerer, workflow, checkpointer)
+    chat = ChatGraph(service, answerer, workflow, checkpointer, llm=llm)
     return Container(
         settings=settings,
         db=db,

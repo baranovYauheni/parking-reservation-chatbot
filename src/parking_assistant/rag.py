@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 LIVE_SOURCE = {"doc_id": "live-data", "title": "Live facility data (SQL)"}
 
 UNKNOWN_ANSWER = (
-    "I don't have information about that in the parking documents. I can help "
-    "with location, rules, services, prices, opening hours, availability and "
-    "reservations."
+    "Hmm, I don't have anything on that in our parking info. I can tell you "
+    "where we are, prices, opening hours, free spaces and parking rules, or "
+    "book a space for you."
 )
 
 SYSTEM_PROMPT = """You are the assistant of a parking garage. Answer the visitor's \

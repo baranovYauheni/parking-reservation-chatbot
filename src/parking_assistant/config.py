@@ -5,7 +5,7 @@ import secrets
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     retrieval_min_score: float | None = Field(default=None, alias="RETRIEVAL_MIN_SCORE")
 
     mcp_timeout_seconds: float = Field(default=30.0, alias="MCP_TIMEOUT_SECONDS")
+
+    @field_validator(
+        "admin_token", "mcp_shared_secret", "openai_api_key", mode="before"
+    )
+    @classmethod
+    def _blank_secret_is_unset(cls, value: object) -> object:
+        if value is None:
+            return None
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if isinstance(raw, str) and not raw.strip():
+            return None
+        return value
 
     @property
     def db_path(self) -> Path:

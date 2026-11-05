@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -12,12 +13,15 @@ from parking_assistant.reservations import (
     validate_period,
 )
 from parking_assistant.timeutils import (
+    EXAMPLE,
     DateParseError,
+    friendly_local,
     from_utc_text,
-    human_local,
     parse_user_datetime,
     to_utc_text,
 )
+
+Extractor = Callable[[str, dict, datetime], dict]
 
 FIELDS: tuple[str, ...] = ("first_name", "last_name", "car_number", "start", "end")
 
@@ -29,14 +33,24 @@ LABELS = {
     "end": "end",
 }
 
-QUESTIONS = {
-    "first_name": "What is your first name?",
-    "last_name": "What is your last name?",
-    "car_number": "What is your car number (for example AB123CD)?",
-    "start": "When should the reservation start? Use YYYY-MM-DD HH:MM in Tbilisi "
-    "time (for example 2026-10-20 09:00) or 'tomorrow 09:00'.",
-    "end": "When should it end? (YYYY-MM-DD HH:MM)",
-}
+
+def question(field_name: str, draft: dict) -> str:
+    first = draft.get("first_name")
+    if field_name == "first_name":
+        return "What's your first name?"
+    if field_name == "last_name":
+        return f"Nice to meet you, {first}! And your last name?"
+    if field_name == "car_number":
+        return "Thanks! What's the car's plate number?"
+    if field_name == "start":
+        return (
+            "When would you like to arrive? A date and time like "
+            f"{EXAMPLE} works, and you can give both at once, e.g. "
+            "\u201ctomorrow 9:00 to 18:00\u201d."
+        )
+    start = from_utc_text(draft["start"])
+    return f"Arriving {friendly_local(start)}. Until when do you need the space?"
+
 
 _ALIASES = {
     "first name": "first_name",
@@ -65,7 +79,14 @@ _ALIASES = {
 }
 _KEY_ALT = "|".join(sorted((re.escape(k) for k in _ALIASES), key=len, reverse=True))
 _PAIR = re.compile(rf"\b({_KEY_ALT})\s*[:=]\s*([^,;\n]+)", re.IGNORECASE)
-_FROM_TO = re.compile(r"\bfrom\s+(.+?)\s+(?:to|until|till)\s+(.+?)\s*$", re.IGNORECASE)
+_RANGE = re.compile(
+    r"^\s*(?:from\s+)?(.+?)\s+(?:to|until|till|through|\-|\u2013|\u2014)\s+(.+?)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+_FROM_RANGE = re.compile(
+    r"\bfrom\s+(.+?)\s+(?:to|until|till|through|\-|\u2013|\u2014)\s+(.+?)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
 _EDIT = re.compile(
     r"^\s*(?:edit|change|update|fix|correct)\s+(?:the\s+|my\s+)?"
     r"(first name|last name|surname|name|car number|car|plate|start|end|period|dates?)",
@@ -130,32 +151,44 @@ def _apply(draft: dict, key: str, value: str, now: datetime) -> str | None:
         if key == "name":
             parts = value.split()
             if len(parts) < 2:
-                return "Please give both first and last name."
+                return "Could you give me both your first and last name?"
             draft["first_name"] = validate_name(parts[0], "First name")
             draft["last_name"] = validate_name(" ".join(parts[1:]), "Last name")
         elif key in ("first_name", "last_name"):
             draft[key] = validate_name(value, LABELS[key].capitalize())
         elif key == "car_number":
             draft[key] = validate_car_number(value)[0]
-        elif key in ("start", "end"):
+        elif key == "start":
             draft[key] = to_utc_text(parse_user_datetime(value, now))
+        elif key == "end":
+            base = from_utc_text(draft["start"]) if draft.get("start") else None
+            draft[key] = to_utc_text(parse_user_datetime(value, now, base=base))
     except (ValueError, DateParseError) as exc:
         return str(exc)
     return None
 
 
 def _check_period(draft: dict, now: datetime) -> str | None:
-    if not (draft.get("start") and draft.get("end")):
+    if not draft.get("start"):
         return None
-    start, end = from_utc_text(draft["start"]), from_utc_text(draft["end"])
+    start = from_utc_text(draft["start"])
+    if start <= now:
+        draft.pop("start", None)
+        draft.pop("end", None)
+        return f"{friendly_local(start)} has already passed, so I can't book it."
+    if not draft.get("end"):
+        return None
+    end = from_utc_text(draft["end"])
     try:
         validate_period(start, end, now)
     except ValueError as exc:
+        draft.pop("end", None)
         message = str(exc)
-        if "start" in message.lower() and "future" in message.lower():
-            draft.pop("start", None)
-        else:
-            draft.pop("end", None)
+        if "after the start" in message:
+            return (
+                f"The end ({friendly_local(end)}) is before the start "
+                f"({friendly_local(start)})."
+            )
         return message
     return None
 
@@ -165,21 +198,22 @@ def summary(draft: dict, service: ReservationService) -> str:
     free = service.free_spaces(start, end)
     price = service.quote(start, end)
     availability = (
-        f"{free} space(s) currently free for this period"
+        f"{free} free {'space' if free == 1 else 'spaces'} for that time right now"
         if free > 0
-        else "no spaces are currently free for this period - the administrator "
-        "may reject the request"
+        else "the parking looks full for that time, so the administrator may "
+        "have to decline"
     )
     return (
-        "Please check your reservation request:\n"
+        "Here's your booking, please take a look:\n"
         f"- Name: {draft['first_name']} {draft['last_name']}\n"
-        f"- Car number: {draft['car_number']}\n"
-        f"- From: {human_local(start)}\n"
-        f"- To: {human_local(end)}\n"
+        f"- Car: {draft['car_number']}\n"
+        f"- From: {friendly_local(start)}\n"
+        f"- To: {friendly_local(end)}\n"
         f"- Estimated price: GEL {price:.2f}\n"
         f"- Availability: {availability}\n"
-        "Reply 'confirm' to send it to the administrator, 'edit <field>' to change "
-        "something (e.g. 'edit car number'), or 'cancel'."
+        "Shall I send it to the administrator? Say \u201cyes\u201d, tell me "
+        "what to change (e.g. \u201cchange the car number\u201d), or "
+        "\u201ccancel\u201d."
     )
 
 
@@ -189,7 +223,7 @@ def _next_prompt(state: dict, service: ReservationService) -> str:
     if todo:
         state["mode"] = "collecting"
         state["awaiting"] = todo[0]
-        return QUESTIONS[todo[0]]
+        return question(todo[0], draft)
     state["mode"] = "confirming"
     state["awaiting"] = "confirmation"
     return summary(draft, service)
@@ -199,23 +233,33 @@ def current_prompt(state: dict, service: ReservationService) -> str:
     return _next_prompt(state, service)
 
 
-def start_booking(state: dict, text: str, service: ReservationService) -> BookingStep:
+def start_booking(
+    state: dict,
+    text: str,
+    service: ReservationService,
+    extractor: Extractor | None = None,
+) -> BookingStep:
     state = _copy(state)
     now = service.clock()
     state["mode"] = "collecting"
-    errors = _extract_pairs(state["draft"], text, now)
+    errors, applied = _extract(state["draft"], text, now)
+    if not applied and extractor is not None:
+        errors, applied = _llm_extract(state["draft"], text, now, extractor)
     period_error = _check_period(state["draft"], now)
     if period_error:
         errors.append(period_error)
-    intro = "Let's make a reservation. "
-    if state["draft"] and not errors:
-        intro += "I've kept the details you already gave me. "
+    intro = "Happy to help you book a space! "
+    if applied and not errors:
+        intro += "Got it. "
     reply = intro + _format_errors(errors) + _next_prompt(state, service)
     return BookingStep(reply, state, errors=errors)
 
 
 def handle_booking_message(
-    state: dict, text: str, service: ReservationService
+    state: dict,
+    text: str,
+    service: ReservationService,
+    extractor: Extractor | None = None,
 ) -> BookingStep:
     state = _copy(state)
     now = service.clock()
@@ -223,8 +267,7 @@ def handle_booking_message(
 
     if _CANCEL.match(text):
         return BookingStep(
-            "The reservation draft was cancelled. Ask me anything or say 'book' to "
-            "start again.",
+            "No problem, I've dropped that booking. Anything else I can help with?",
             new_booking_state(),
         )
 
@@ -279,13 +322,13 @@ def handle_booking_message(
             return BookingStep("", state, submit=request)
         if _DECLINE.match(text):
             return BookingStep(
-                "What would you like to change? Write for example 'edit start' or "
-                "'edit car number', or 'cancel'.",
+                "Sure, what should I change: the name, the car, the start or the "
+                "end? Or say \u201ccancel\u201d to drop it.",
                 state,
             )
 
-    errors = _extract_pairs(draft, text, now)
-    if not errors and not _PAIR.search(text) and not _FROM_TO.search(text):
+    errors, applied = _extract(draft, text, now)
+    if not applied:
         awaiting = state.get("awaiting")
         if awaiting in FIELDS:
             key = awaiting
@@ -296,10 +339,18 @@ def handle_booking_message(
             ):
                 key = "name"
             error = _apply(draft, key, text, now)
+            if error and extractor is not None:
+                llm_errors, llm_applied = _llm_extract(draft, text, now, extractor)
+                if llm_applied:
+                    error = None
+                    errors.extend(llm_errors)
             if error:
                 errors.append(error)
         elif state["mode"] == "confirming":
-            errors.append("Please reply 'confirm', 'edit <field>' or 'cancel'.")
+            errors.append(
+                "Just say \u201cyes\u201d to send it, tell me what to change, or "
+                "\u201ccancel\u201d."
+            )
     period_error = _check_period(draft, now)
     if period_error:
         errors.append(period_error)
@@ -308,20 +359,45 @@ def handle_booking_message(
     )
 
 
-def _extract_pairs(draft: dict, text: str, now: datetime) -> list[str]:
-    errors = []
-    from_to = _FROM_TO.search(text)
-    if from_to and not _PAIR.search(text):
-        for key, value in (("start", from_to.group(1)), ("end", from_to.group(2))):
+def _extract(draft: dict, text: str, now: datetime) -> tuple[list[str], bool]:
+    errors: list[str] = []
+    pairs = _PAIR.findall(text)
+    if pairs:
+        for raw_key, value in pairs:
+            error = _apply(draft, _ALIASES[raw_key.lower()], value, now)
+            if error:
+                errors.append(error)
+        return errors, True
+    for match in (_RANGE.match(text), _FROM_RANGE.search(text)):
+        if match is None:
+            continue
+        trial = dict(draft)
+        if _apply(trial, "start", match.group(1), now) is None and (
+            _apply(trial, "end", match.group(2), now) is None
+        ):
+            draft.update(trial)
+            return errors, True
+    return errors, False
+
+
+def _llm_extract(
+    draft: dict, text: str, now: datetime, extractor: Extractor
+) -> tuple[list[str], bool]:
+    try:
+        found = extractor(text, dict(draft), now) or {}
+    except Exception:
+        return [], False
+    errors: list[str] = []
+    applied = False
+    for key in ("first_name", "last_name", "car_number", "start", "end"):
+        value = found.get(key)
+        if isinstance(value, str) and value.strip():
             error = _apply(draft, key, value, now)
             if error:
                 errors.append(error)
-        return errors
-    for raw_key, value in _PAIR.findall(text):
-        error = _apply(draft, _ALIASES[raw_key.lower()], value, now)
-        if error:
-            errors.append(error)
-    return errors
+            else:
+                applied = True
+    return errors, applied
 
 
 def _format_errors(errors: list[str]) -> str:
