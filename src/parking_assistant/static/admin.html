@@ -75,7 +75,7 @@ async function decide(id, action) {
   if (action === 'reject') { reason = prompt('Reason for rejection (optional):') || ''; }
   try {
     await api(`/api/admin/requests/${id}/decision`, {method: 'POST', body: JSON.stringify({action, reason})});
-    msg.textContent = `Request #${id.slice(0, 8)}: ${action}d.`;
+    msg.textContent = `Request #${id.slice(0, 8)}: ${action === 'approve' ? 'approved' : 'rejected'}.`;
   } catch (e) { msg.textContent = `Request #${id.slice(0, 8)}: ${e.message}`; }
   load();
 }
